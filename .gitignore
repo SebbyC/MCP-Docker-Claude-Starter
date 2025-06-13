@@ -1,0 +1,38 @@
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# User directories and files
+../../../*
+../../*
+../*
+!../MCP-Claude-Demo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Docker
+.dockerignore
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+*~
+.cache/
+.config/
+.ssh/

@@ -1,0 +1,8 @@
+databases:
+  default:
+    url: "postgresql+psycopg2://myuser:mypassword@db/mydatabase"
+
+tools:
+  - name: items_table
+    description: "Return id and name for all items"
+    query: "SELECT id, name FROM items"

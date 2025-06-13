@@ -1,0 +1,122 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><title>MCP Visualizer</title>
+<style>
+ body{font-family:sans-serif;padding:2rem;background:#f8fafc}
+ button{margin:.25rem 0;padding:.5rem 1rem;cursor:pointer}
+ pre{background:#0b1120;color:#e5e7eb;padding:1rem;overflow-x:auto}
+</style></head><body>
+<h1>MCP Tool Catalog</h1>
+<div style="margin-bottom:2rem;padding:1rem;background:#e5f3ff;border-radius:8px">
+  <h3>🤖 AI Agent Interface</h3>
+  <p>Ask the AI agent to interact with MCP tools using natural language:</p>
+  <input type="text" id="aiQuery" placeholder="Try: 'list all items' or 'create a new item called My Item'" style="width:60%;padding:0.5rem;margin-right:0.5rem">
+  <button onclick="askAI()" style="padding:0.5rem 1rem">Ask AI</button>
+  <div id="aiResponse" style="margin-top:1rem"></div>
+</div>
+<ul id="list"></ul>
+
+<script>
+const ul=document.getElementById('list');
+
+// 1️⃣ Discover tools
+fetch('/mcp/v1/tools').then(r=>r.json()).then(({tools})=>{
+  tools.forEach(t=>{
+    const li=document.createElement('li');
+    const btn=document.createElement('button');
+    const p=document.createElement('p');
+    btn.textContent=t.name;
+    btn.onclick=()=>invoke(t,li);
+    p.textContent=t.description;
+    li.append(btn,p);
+    
+    // Add input fields for required parameters
+    if(t.schema.required && t.schema.required.length > 0){
+      const form=document.createElement('div');
+      form.style.marginTop='0.5rem';
+      t.schema.required.forEach(param=>{
+        const input=document.createElement('input');
+        input.placeholder=`${param} (${t.schema.properties[param]?.description || param})`;
+        input.setAttribute('data-param',param);
+        input.style.margin='0.25rem';
+        input.style.padding='0.25rem';
+        form.append(input);
+      });
+      li.append(form);
+    }
+    
+    ul.append(li);
+  });
+});
+
+// 2️⃣ Invoke a tool
+function invoke(tool,li){
+  const body = {};
+  
+  // Collect parameters from input fields
+  li.querySelectorAll('input[data-param]').forEach(input=>{
+    const param = input.getAttribute('data-param');
+    if(input.value.trim()) {
+      body[param] = input.value.trim();
+    }
+  });
+  
+  fetch(`/mcp/v1/tools/${tool.name}`,{
+    method:'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined
+  })
+    .then(r=>r.json())
+    .then(j=>{
+      let pre=li.querySelector('pre')||li.appendChild(document.createElement('pre'));
+      pre.textContent=JSON.stringify(j,null,2);
+    })
+    .catch(e=>alert(e));
+}
+
+// 🤖 AI Agent Function
+function askAI(){
+  const query = document.getElementById('aiQuery').value.trim();
+  const responseDiv = document.getElementById('aiResponse');
+  
+  if(!query) {
+    responseDiv.innerHTML = '<p style="color:red">Please enter a query</p>';
+    return;
+  }
+  
+  responseDiv.innerHTML = '<p>🤔 AI is thinking...</p>';
+  
+  fetch('/api/ai/agent', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({query: query})
+  })
+  .then(r => r.json())
+  .then(data => {
+    let html = `<div style="background:#f0f9ff;padding:1rem;border-radius:4px;margin-top:0.5rem">`;
+    html += `<strong>Query:</strong> "${data.query}"<br>`;
+    html += `<strong>Available Tools:</strong> ${data.available_tools.join(', ')}<br><br>`;
+    
+    data.results.forEach(result => {
+      html += `<div style="margin:0.5rem 0;padding:0.5rem;background:white;border-radius:4px">`;
+      html += `<strong>Action:</strong> ${result.action}<br>`;
+      if(result.tool_used) html += `<strong>Tool Used:</strong> ${result.tool_used}<br>`;
+      html += `<strong>Result:</strong> ${result.interpretation}<br>`;
+      if(result.result) {
+        html += `<details><summary>Raw Data</summary><pre style="font-size:0.8em">${JSON.stringify(result.result, null, 2)}</pre></details>`;
+      }
+      html += `</div>`;
+    });
+    
+    html += `<br><strong>Try these examples:</strong><br>`;
+    data.usage_examples.forEach(ex => {
+      html += `<button onclick="document.getElementById('aiQuery').value='${ex}';askAI()" style="margin:0.25rem;padding:0.25rem 0.5rem;font-size:0.8em">${ex}</button>`;
+    });
+    html += `</div>`;
+    
+    responseDiv.innerHTML = html;
+  })
+  .catch(e => {
+    responseDiv.innerHTML = `<p style="color:red">Error: ${e.message}</p>`;
+  });
+}
+</script></body></html>

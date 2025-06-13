@@ -1,0 +1,340 @@
+# End-to-End Blueprint: Bootstrapping the **“MCP Visualizer”** Demo
+
+*(for any competent AI/software-automation agent to execute without human help)*
+
+---
+
+## 0. High-Level Goal
+
+> Stand up **four tiny containers**—`frontend` → `nginx`, `backend` → `fastapi`, `db` → `postgres`, `mcp` → `model-context-protocol` reference server—so a single static web page can
+>
+> 1. discover MCP tools at **`GET /mcp/v1/tools`** and
+> 2. invoke a tool at **`POST /mcp/v1/tools/<name>`**,
+>    then render the JSON response in-browser.
+
+The entire system must:
+
+* build in < 60 s on broadband,
+* run via **`./Start-App.sh`**,
+* expose **exactly one** host port (`8080` → Nginx :80),
+* seed the database automatically on first boot,
+* require **zero Node / build steps** (pure HTML + JS).
+
+---
+
+## 1. Directory & File Scaffolding
+
+```
+project-root/
+│
+├── frontend/
+│   ├── index.html          # static UI + JS fetch logic
+│   ├── nginx.conf          # proxy /api/*  &  /mcp/*
+│   └── Dockerfile          # copies html + config into nginx:alpine
+│
+├── backend/
+│   ├── main.py             # FastAPI endpoint /api/items
+│   └── Dockerfile
+│
+├── mcp-server/
+│   ├── mcp_config.yaml     # SQL → MCP tool mapping
+│   └── Dockerfile
+│
+├── db/
+│   └── init.sql            # CREATE TABLE + sample rows
+│
+├── docker-compose.yml
+└── Start-App.sh
+```
+
+Create these folders/files in sequence.
+(An AI agent can use `mkdir -p` and `cat > … <<'EOF' … EOF` blocks.)
+
+---
+
+## 2. Static Front-End
+
+### 2.1 `frontend/index.html`
+
+```html
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><title>MCP Visualizer</title>
+<style>
+ body{font-family:sans-serif;padding:2rem;background:#f8fafc}
+ button{margin:.25rem 0;padding:.5rem 1rem;cursor:pointer}
+ pre{background:#0b1120;color:#e5e7eb;padding:1rem;overflow-x:auto}
+</style></head><body>
+<h1>MCP Tool Catalog</h1><ul id="list"></ul>
+
+<script>
+const ul=document.getElementById('list');
+
+// 1️⃣ Discover tools
+fetch('/mcp/v1/tools').then(r=>r.json()).then(({tools})=>{
+  tools.forEach(t=>{
+    const li=document.createElement('li');
+    const btn=document.createElement('button');
+    btn.textContent=t.name;
+    btn.onclick=()=>invoke(t.name,li);
+    li.append(btn,document.createElement('p'))
+       .textContent=t.description;
+    ul.append(li);
+  });
+});
+
+// 2️⃣ Invoke a tool
+function invoke(name,li){
+  fetch(`/mcp/v1/tools/${name}`,{method:'POST'})
+    .then(r=>r.json())
+    .then(j=>{
+      let pre=li.querySelector('pre')||li.appendChild(document.createElement('pre'));
+      pre.textContent=JSON.stringify(j,null,2);
+    })
+    .catch(e=>alert(e));
+}
+</script></body></html>
+```
+
+*Uses Fetch API; no build step required.*
+
+### 2.2 `frontend/nginx.conf`
+
+```nginx
+server {
+    listen 80;
+    server_name localhost;
+
+    # Proxy MCP JSON-RPC
+    location /mcp/ {
+        proxy_pass       http://mcp:7000;   # keep original URI
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Proxy REST API
+    location /api/ {
+        proxy_pass http://backend:8000;
+    }
+
+    # Serve static site
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html =404;
+    }
+}
+```
+
+### 2.3 `frontend/Dockerfile`
+
+```Dockerfile
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html/index.html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+```
+
+---
+
+## 3. FastAPI Backend
+
+### 3.1 `backend/main.py`
+
+```python
+from fastapi import FastAPI
+import psycopg2, os
+
+cfg = {
+    "host": os.getenv("POSTGRES_HOST", "db"),
+    "db":   os.getenv("POSTGRES_DB",   "mydatabase"),
+    "user": os.getenv("POSTGRES_USER", "myuser"),
+    "pw":   os.getenv("POSTGRES_PASSWORD","mypassword")
+}
+
+app = FastAPI()
+
+@app.get("/api/items")
+def items():
+    conn = psycopg2.connect(host=cfg["host"], database=cfg["db"],
+                             user=cfg["user"], password=cfg["pw"])
+    cur  = conn.cursor()
+    cur.execute("SELECT id,name FROM items;")
+    data = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return {"items": data}
+```
+
+### 3.2 `backend/Dockerfile`
+
+```Dockerfile
+FROM python:3.10-slim
+WORKDIR /app
+COPY main.py .
+RUN pip install fastapi uvicorn psycopg2-binary
+EXPOSE 8000
+CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]
+```
+
+---
+
+## 4. PostgreSQL Seed
+
+### 4.1 `db/init.sql`
+
+```sql
+CREATE TABLE IF NOT EXISTS items (
+  id   SERIAL PRIMARY KEY,
+  name TEXT
+);
+
+INSERT INTO items (name) VALUES
+ ('Sample Item 1'),
+ ('Sample Item 2'),
+ ('Sample Item 3');
+```
+
+Placed under `/docker-entrypoint-initdb.d/` in the container → auto-executes on first boot.
+
+---
+
+## 5. MCP Reference Server
+
+### 5.1 `mcp-server/mcp_config.yaml`
+
+```yaml
+databases:
+  default:
+    url: "postgresql+psycopg2://myuser:mypassword@db/mydatabase"
+
+tools:
+  - name: items_table
+    description: "Return id and name for all items"
+    query: "SELECT id, name FROM items"
+```
+
+### 5.2 `mcp-server/Dockerfile`
+
+```Dockerfile
+FROM python:3.10-slim
+RUN pip install "mcp-server[postgres]"
+COPY mcp_config.yaml /srv/
+WORKDIR /srv
+EXPOSE 7000
+CMD ["mcp-server","--config","mcp_config.yaml",
+     "--host","0.0.0.0","--port","7000"]
+```
+
+---
+
+## 6. Multi-Service Orchestration
+
+### 6.1 `docker-compose.yml`
+
+```yaml
+version: "3.9"
+services:
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [backend]
+
+  backend:
+    build: ./backend
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: mydatabase
+    depends_on: [db]
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: mydatabase
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  mcp:
+    build: ./mcp-server
+    depends_on: [db]
+```
+
+*Compose’s default network lets services resolve each other by name (`db`, `backend`, `mcp`).*
+
+---
+
+## 7. Single-Shot Launcher
+
+### 7.1 `Start-App.sh`
+
+```bash
+#!/usr/bin/env bash
+docker compose up --build -d
+echo "Visit → http://localhost:8080  (catalog & tool output)"
+```
+
+`chmod +x Start-App.sh`
+
+---
+
+## 8. Automated Build-and-Run Sequence (CLI Agent Script)
+
+An AI agent can execute these shell steps exactly:
+
+```bash
+# clone or mkdir project-root; cd into it
+
+# 1. scaffold directories & files (as shown above)
+
+# 2. build & start everything
+./Start-App.sh
+
+# 3. verify
+curl -s http://localhost:8080/mcp/v1/tools | jq .
+curl -s -X POST http://localhost:8080/mcp/v1/tools/items_table | jq .
+```
+
+The first call returns:
+
+```json
+{
+  "tools": [
+    {
+      "name": "items_table",
+      "description": "Return id and name for all items",
+      "schema": { ... }
+    }
+  ]
+}
+```
+
+The second returns:
+
+```json
+{ "rows": [ { "id":1,"name":"Sample Item 1"}, … ] }
+```
+
+Browser interaction uses the identical paths via Nginx.
+
+---
+
+## 9. Extending / Customising
+
+| Change          | File(s)                                                            | How                                                     |
+| --------------- | ------------------------------------------------------------------ | ------------------------------------------------------- |
+| Add tools       | `mcp_config.yaml`                                                  | Append more `- name:` blocks (SQL, shell, Python).      |
+| Add auth        | `frontend/nginx.conf`                                              | Insert `auth_basic` or JWT header proxy.                |
+| Persist DB data | `docker-compose.yml`                                               | Mount named volume: `db-data:/var/lib/postgresql/data`. |
+| Multiple pages  | Add more `.html` files + `try_files` rule already handles routing. |                                                         |
+
+---
+
+## 10. Key Take-Aways for the Next AI
+
+1. **Everything is declarative**—one Dockerfile per service, one Compose file to glue them.
+2. **MCP server is stateless**—reads YAML → exposes JSON-RPC; no code edits needed for new SQL tools.
+3. **Static front-end equals zero runtime deps**—only Nginx; fastest way to visualise protocol traffic.
+4. **Seed SQL script runs only on initial volume creation**—remove the volume to reset demo.
+5. **Single host port** (8080) makes firewall rules simple for live venues.
+
+Follow the blueprint verbatim and an automated agent—or any developer—can reproduce the demo from an empty directory in under five minutes.
